@@ -367,7 +367,7 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username or user.first_name
 
-    qr_path = "payment_qr.jped"
+    qr_path = "payment_qr.jpeg"
 
     caption = (
         f"💰 *MANUAL TOP-UP INSTRUCTIONS*\n\n"
