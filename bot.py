@@ -21,7 +21,7 @@ if not TELEGRAM_BOT_TOKEN or not FIVESIM_API_KEY or not ADMIN_ID:
     print("Please set: TELEGRAM_BOT_TOKEN, FIVESIM_API_KEY, ADMIN_ID")
     exit(1)
 
-USD_TO_NPR = 133.0
+USD_TO_NPR = 250.0
 DB_NAME = "telegram_bot.db"
 
 # Service display names
