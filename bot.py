@@ -366,47 +366,46 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /topup command - Show payment QR and instructions."""
     user = update.effective_user
     username = user.username or user.first_name
-    
-    qr_path = "payment_qr.png"
-    
+
+    qr_path = "payment_qr.jped"
+
     caption = (
         f"💰 *MANUAL TOP-UP INSTRUCTIONS*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*🏦 DO PAYMENT FROM BANK* 💳\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• Amount: *Minimum NPR 100*\n"
         f"• *Please write only your name* in the Remarks section. 🙂\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*📌 AFTER PAYMENT:*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"1️⃣ Send your *Transaction ID* or *Payment Screenshot* to:\n"
         f"   👤 Admin: @VIVEKASDA\n\n"
         f"2️⃣ Our admin will verify and add balance to your account.\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*⏰ PROCESSING TIME:*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• Usually takes *5-10 minutes*\n"
         f"• In some rare cases, it may take *24 hours or more* ⏳\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*📝 IMPORTANT:*\n"
         f"• Write your name exactly as: `{username}`\n"
         f"• This helps us identify your payment quickly ✅\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*Thank you for using our service!* ❤️🔥"
     )
-    
+
     try:
-        with open(qr_path, 'rb') as photo:
+        with open(qr_path, "rb") as photo:
             await update.message.reply_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode='Markdown'
+                photo=photo, caption=caption, parse_mode="Markdown"
             )
     except FileNotFoundError:
         # If QR image not found, send text only
         await update.message.reply_text(
-            caption + "\n\n⚠️ *QR Code Image Not Found*\nPlease contact admin for payment details.",
-            parse_mode='Markdown'
+            caption
+            + "\n\n⚠️ *QR Code Image Not Found*\nPlease contact admin for payment details.",
+            parse_mode="Markdown",
         )
 
 
