@@ -1,30 +1,44 @@
-# bot.py - Complete Virtual Number Telegram Bot with Smart Refund Logic
+# bot.py - Complete Virtual Number Telegram Bot with PostgreSQL
 import os
 import logging
 import asyncio
 import re
-import sqlite3
 import time
 import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# ======================= IMPORT POSTGRESQL FUNCTIONS =======================
+# Instead of SQLite, we use PostgreSQL
+from db_postgres import *
+
 # ======================= CONFIGURATION =======================
 
+# Get from environment variables (Railway)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 FIVESIM_API_KEY = os.environ.get("FIVESIM_API_KEY")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
+# USD to NPR exchange rate (can be set via environment variable)
+USD_TO_NPR = float(os.environ.get("USD_TO_NPR", 250.0))
+
+# Validate environment variables
 if not TELEGRAM_BOT_TOKEN or not FIVESIM_API_KEY or not ADMIN_ID:
     print("❌ Missing environment variables!")
     print("Please set: TELEGRAM_BOT_TOKEN, FIVESIM_API_KEY, ADMIN_ID")
     exit(1)
 
-USD_TO_NPR = 250.0
-DB_NAME = "telegram_bot.db"
+# Check if DATABASE_URL is set for PostgreSQL
+if not os.environ.get('DATABASE_URL'):
+    print("❌ DATABASE_URL not set!")
+    print("Please add PostgreSQL database to Railway.")
+    print("  1. Go to Railway Dashboard")
+    print("  2. Click New → Database → PostgreSQL")
+    print("  3. The DATABASE_URL will be auto-added to your service")
+    exit(1)
 
-# Service display names
+# ======================= SERVICE NAMES =======================
 SERVICE_NAMES = {
     "telegram": "📱 Telegram",
     "whatsapp": "💬 WhatsApp",
@@ -36,161 +50,30 @@ SERVICE_NAMES = {
     "openai": "🤖 ChatGPT",
     "tiktok": "🎵 TikTok",
     "twitter": "🐦 Twitter",
+    "snapchat": "👻 Snapchat",
+    "linkedin": "💼 LinkedIn",
+    "discord": "🎮 Discord",
+    "reddit": "🔴 Reddit",
+    "spotify": "🎵 Spotify",
+    "netflix": "🎬 Netflix",
+    "youtube": "▶️ YouTube",
+    "apple": "🍎 Apple",
+    "uber": "🚗 Uber",
+    "airbnb": "🏠 Airbnb",
+    "paypal": "💳 PayPal",
+    "coinbase": "🪙 Coinbase",
+    "binance": "📊 Binance",
+    "twitch": "🎮 Twitch",
+    "pinterest": "📌 Pinterest",
+    "tumblr": "📝 Tumblr",
 }
 
-
-# ======================= DATABASE SETUP =======================
-def get_db():
-    return sqlite3.connect(DB_NAME)
-
-
-def setup_database():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        balance_npr REAL DEFAULT 0,
-        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        order_id_5sim TEXT,
-        phone TEXT,
-        service TEXT,
-        country TEXT,
-        price_usd REAL,
-        price_npr REAL,
-        status TEXT,
-        code TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(user_id)
-    )""")
-    # Add failed_orders table for tracking
-    c.execute("""CREATE TABLE IF NOT EXISTS failed_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        service TEXT,
-        country TEXT,
-        cost_usd REAL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )""")
-    c.execute("PRAGMA table_info(orders)")
-    columns = [col[1] for col in c.fetchall()]
-    if "service" not in columns:
-        c.execute("ALTER TABLE orders ADD COLUMN service TEXT")
-    if "code" not in columns:
-        c.execute("ALTER TABLE orders ADD COLUMN code TEXT")
-    conn.commit()
-    conn.close()
-    print("✅ Database ready")
-
-
-def add_user(user_id, username, first_name):
-    conn = get_db()
-    c = conn.cursor()
-    try:
-        c.execute(
-            "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-            (user_id, username, first_name),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
-    finally:
-        conn.close()
-
-
-def get_user_balance(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT balance_npr FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-
-def update_user_balance(user_id, amount, operation="add"):
-    conn = get_db()
-    c = conn.cursor()
-    if operation == "add":
-        c.execute(
-            "UPDATE users SET balance_npr = balance_npr + ? WHERE user_id = ?",
-            (amount, user_id),
-        )
-    else:
-        c.execute(
-            "UPDATE users SET balance_npr = balance_npr - ? WHERE user_id = ?",
-            (amount, user_id),
-        )
-    conn.commit()
-    conn.close()
-
-
-def record_order(
-    user_id, order_id_5sim, phone, service, country, price_usd, price_npr, status
-):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        """INSERT INTO orders (user_id, order_id_5sim, phone, service, country, price_usd, price_npr, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, order_id_5sim, phone, service, country, price_usd, price_npr, status),
-    )
-    order_db_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return order_db_id
-
-
-def update_order_status(order_db_id, status, code=None):
-    conn = get_db()
-    c = conn.cursor()
-    if code:
-        c.execute(
-            "UPDATE orders SET status = ?, code = ? WHERE id = ?",
-            (status, code, order_db_id),
-        )
-    else:
-        c.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_db_id))
-    conn.commit()
-    conn.close()
-
-
-def get_user_orders(user_id, limit=15):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        """SELECT id, service, country, phone, price_npr, status, code, created_at
-                 FROM orders WHERE user_id = ?
-                 ORDER BY created_at DESC LIMIT ?""",
-        (user_id, limit),
-    )
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-
-def log_failure(user_id, service, country, cost_usd):
-    """Log failed purchase for tracking."""
-    conn = get_db()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO failed_orders (user_id, service, country, cost_usd) VALUES (?, ?, ?, ?)",
-        (user_id, service, country, cost_usd),
-    )
-    conn.commit()
-    conn.close()
-    print(f"❌ FAILED: User {user_id} | {service} | {country} | Lost ${cost_usd:.4f}")
-
-
 # ======================= 5SIM API =======================
+
 HEADERS = {"Authorization": f"Bearer {FIVESIM_API_KEY}", "Accept": "application/json"}
 
-
 def api_request(url, timeout=20, retries=2):
+    """Make API request with retries."""
     for attempt in range(retries):
         try:
             resp = requests.get(url, headers=HEADERS, timeout=timeout)
@@ -203,7 +86,6 @@ def api_request(url, timeout=20, retries=2):
         time.sleep(1)
     return None
 
-
 def get_balance_usd():
     """Get your 5sim account balance in USD."""
     url = "https://5sim.net/v1/user/profile"
@@ -212,12 +94,11 @@ def get_balance_usd():
         return data.get("balance", 0.0)
     return None
 
-
 _services_cache = {"data": None, "timestamp": 0}
 CACHE_TTL = 300
 
-
 def get_all_services():
+    """Fetch all activation services from 5sim (cached)."""
     now = time.time()
     if _services_cache["data"] and (now - _services_cache["timestamp"]) < CACHE_TTL:
         return _services_cache["data"]
@@ -231,8 +112,8 @@ def get_all_services():
     _services_cache["timestamp"] = now
     return services
 
-
 def get_countries_for_service(service):
+    """Fetch countries with stock for a service."""
     url = f"https://5sim.net/v1/guest/prices?product={service}"
     data = api_request(url, timeout=10)
     if not data:
@@ -248,52 +129,45 @@ def get_countries_for_service(service):
                     if min_usd is None or cost < min_usd:
                         min_usd = cost
             if min_usd is not None:
-                result.append(
-                    {
-                        "country": country,
-                        "price_usd": min_usd,
-                        "price_npr": min_usd * USD_TO_NPR,
-                    }
-                )
+                result.append({
+                    "country": country,
+                    "price_usd": min_usd,
+                    "price_npr": min_usd * USD_TO_NPR,
+                })
     return sorted(result, key=lambda x: x["price_usd"])
 
-
 def buy_number(country, product):
+    """Buy a virtual number from 5sim."""
     url = f"https://5sim.net/v1/user/buy/activation/{country}/any/{product}"
     return api_request(url, timeout=20, retries=1)
 
-
 def check_order(order_id):
+    """Check if SMS arrived for an order."""
     url = f"https://5sim.net/v1/user/check/{order_id}"
     return api_request(url, timeout=10, retries=2)
 
-
 def finish_order(order_id):
+    """Mark order as completed."""
     try:
-        requests.get(
-            f"https://5sim.net/v1/user/finish/{order_id}", headers=HEADERS, timeout=10
-        )
+        requests.get(f"https://5sim.net/v1/user/finish/{order_id}", headers=HEADERS, timeout=10)
     except:
         pass
-
 
 def cancel_order(order_id):
+    """Cancel order (refund if no SMS)."""
     try:
-        requests.get(
-            f"https://5sim.net/v1/user/cancel/{order_id}", headers=HEADERS, timeout=10
-        )
+        requests.get(f"https://5sim.net/v1/user/cancel/{order_id}", headers=HEADERS, timeout=10)
     except:
         pass
-
 
 # ======================= BOT HANDLERS =======================
 
-
 def get_service_display(service):
+    """Get display name for a service."""
     return SERVICE_NAMES.get(service, service.capitalize())
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command."""
     user = update.effective_user
     add_user(user.id, user.username, user.first_name)
     await update.message.reply_text(
@@ -305,6 +179,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check your balance\n"
         "/topup - Add funds to your account\n"
         "/myorders - View your purchase history\n"
+        "/support - Contact support\n"
         "/help - Show this help\n\n"
         "💡 *Quick Start:*\n"
         "1. /topup - Add balance\n"
@@ -313,8 +188,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command."""
     await update.message.reply_text(
         "🤖 *How to use this bot*\n\n"
         "1️⃣ /buy – Browse all available services\n"
@@ -323,22 +198,24 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "4️⃣ Get your verification code!\n\n"
         "💰 Need balance? Use /topup\n"
         "📊 Check your balance: /balance\n"
-        "📋 View orders: /myorders\n\n"
+        "📋 View orders: /myorders\n"
+        "📞 Need help? /support\n\n"
         "Admin will manually add balance after payment.",
         parse_mode="Markdown",
     )
 
-
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /balance command."""
     user_id = update.effective_user.id
     balance = get_user_balance(user_id)
     await update.message.reply_text(
-        f"💰 *Your Balance:* NPR {balance:.2f}\n\n" f"Need more? Use /topup",
+        f"💰 *Your Balance:* NPR {balance:.2f}\n\n"
+        f"Need more? Use /topup",
         parse_mode="Markdown",
     )
 
-
 async def myorders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /myorders command."""
     user_id = update.effective_user.id
     orders = get_user_orders(user_id, limit=15)
 
@@ -350,9 +227,7 @@ async def myorders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for order in orders:
         _, service, country, phone, price, status, code, created_at = order
         phone_short = phone[-4:] if phone and len(phone) >= 4 else "N/A"
-        status_emoji = (
-            "✅" if status == "SUCCESS" else "⏳" if status == "WAITING_SMS" else "❌"
-        )
+        status_emoji = "✅" if status == "SUCCESS" else "⏳" if status == "WAITING_SMS" else "❌"
         msg += f"{status_emoji} *{get_service_display(service)}* - {country.capitalize()}\n"
         msg += f"   📞 ...{phone_short} | 💸 NPR {price:.2f}\n"
         if code and status == "SUCCESS":
@@ -361,6 +236,19 @@ async def myorders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /support command."""
+    await update.message.reply_text(
+        "📞 *Need Help?*\n\n"
+        "Contact our support team:\n"
+        "👤 Admin: @VIVEKASDA\n\n"
+        "📌 *Before contacting:*\n"
+        "• Check your balance with /balance\n"
+        "• View your orders with /myorders\n"
+        "• Try /help for guidance\n\n"
+        "We'll respond within 24 hours!",
+        parse_mode="Markdown",
+    )
 
 async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /topup command - Show payment QR and instructions."""
@@ -401,33 +289,28 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=photo, caption=caption, parse_mode="Markdown"
             )
     except FileNotFoundError:
-        # If QR image not found, send text only
         await update.message.reply_text(
-            caption
-            + "\n\n⚠️ *QR Code Image Not Found*\nPlease contact admin for payment details.",
+            caption + "\n\n⚠️ *QR Code Image Not Found*\nPlease contact admin for payment details.",
             parse_mode="Markdown",
         )
 
-
 # ======================= BUY FLOW =======================
 
-
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /buy command - Show services."""
     await update.message.reply_text("🔍 Fetching available services from 5sim...")
 
     services = get_all_services()
     if not services:
-        await update.message.reply_text(
-            "❌ No services available right now. Try again later."
-        )
+        await update.message.reply_text("❌ No services available right now. Try again later.")
         return
 
     context.user_data["all_services"] = services
     context.user_data["services_page"] = 0
     await send_services_page(update, context, update.effective_chat.id)
 
-
 async def send_services_page(update, context, chat_id, is_search=False):
+    """Send a page of services with navigation."""
     services = context.user_data.get("all_services", [])
     page = context.user_data.get("services_page", 0)
     per_page = 30
@@ -446,13 +329,9 @@ async def send_services_page(update, context, chat_id, is_search=False):
 
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(
-            InlineKeyboardButton("◀️ Previous", callback_data="svc_page_prev")
-        )
+        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data="svc_page_prev"))
     if page < total_pages - 1:
-        nav_buttons.append(
-            InlineKeyboardButton("Next ▶️", callback_data="svc_page_next")
-        )
+        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data="svc_page_next"))
     if nav_buttons:
         keyboard.append(nav_buttons)
 
@@ -464,12 +343,10 @@ async def send_services_page(update, context, chat_id, is_search=False):
         reply_markup=reply_markup,
     )
 
-
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /search command."""
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /search <keyword>\nExample: /search telegram"
-        )
+        await update.message.reply_text("Usage: /search <keyword>\nExample: /search telegram")
         return
 
     query = " ".join(context.args).lower()
@@ -484,28 +361,23 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["services_page"] = 0
     await send_services_page(update, context, update.effective_chat.id, is_search=True)
 
-
 # ======================= CALLBACKS =======================
 
-
 async def service_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle service page navigation."""
     query = update.callback_query
     await query.answer()
 
     if query.data == "svc_page_prev":
-        context.user_data["services_page"] = max(
-            0, context.user_data.get("services_page", 0) - 1
-        )
+        context.user_data["services_page"] = max(0, context.user_data.get("services_page", 0) - 1)
     elif query.data == "svc_page_next":
-        context.user_data["services_page"] = (
-            context.user_data.get("services_page", 0) + 1
-        )
+        context.user_data["services_page"] = context.user_data.get("services_page", 0) + 1
 
     await query.message.delete()
     await send_services_page(update, context, query.message.chat_id)
 
-
 async def service_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle service selection."""
     query = update.callback_query
     await query.answer()
 
@@ -527,8 +399,8 @@ async def service_select_callback(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["countries_page"] = 0
     await send_countries_page(update, context, query.message.chat_id)
 
-
 async def send_countries_page(update, context, chat_id):
+    """Send a page of countries with prices."""
     countries = context.user_data.get("service_countries", [])
     page = context.user_data.get("countries_page", 0)
     per_page = 20
@@ -543,25 +415,17 @@ async def send_countries_page(update, context, chat_id):
     keyboard = []
     for country in page_countries:
         display = f"{country['country'].capitalize()} – NPR {country['price_npr']:.2f}"
-        keyboard.append(
-            [InlineKeyboardButton(display, callback_data=f"cntry_{country['country']}")]
-        )
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"cntry_{country['country']}")])
 
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(
-            InlineKeyboardButton("◀️ Previous", callback_data="cntry_page_prev")
-        )
+        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data="cntry_page_prev"))
     if page < total_pages - 1:
-        nav_buttons.append(
-            InlineKeyboardButton("Next ▶️", callback_data="cntry_page_next")
-        )
+        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data="cntry_page_next"))
     if nav_buttons:
         keyboard.append(nav_buttons)
 
-    keyboard.append(
-        [InlineKeyboardButton("🔙 Back to Services", callback_data="back_to_services")]
-    )
+    keyboard.append([InlineKeyboardButton("🔙 Back to Services", callback_data="back_to_services")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     service = context.user_data.get("selected_service", "")
@@ -571,25 +435,21 @@ async def send_countries_page(update, context, chat_id):
         reply_markup=reply_markup,
     )
 
-
 async def country_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle country page navigation."""
     query = update.callback_query
     await query.answer()
 
     if query.data == "cntry_page_prev":
-        context.user_data["countries_page"] = max(
-            0, context.user_data.get("countries_page", 0) - 1
-        )
+        context.user_data["countries_page"] = max(0, context.user_data.get("countries_page", 0) - 1)
     elif query.data == "cntry_page_next":
-        context.user_data["countries_page"] = (
-            context.user_data.get("countries_page", 0) + 1
-        )
+        context.user_data["countries_page"] = context.user_data.get("countries_page", 0) + 1
 
     await query.message.delete()
     await send_countries_page(update, context, query.message.chat_id)
 
-
 async def back_to_services_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Go back to services list."""
     query = update.callback_query
     await query.answer()
     await query.message.delete()
@@ -603,11 +463,10 @@ async def back_to_services_callback(update: Update, context: ContextTypes.DEFAUL
     context.user_data["services_page"] = 0
     await send_services_page(update, context, query.message.chat_id)
 
-
 # ======================= COUNTRY SELECT WITH SMART REFUND =======================
 
-
 async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle country selection and purchase with smart refund logic."""
     query = update.callback_query
     await query.answer()
 
@@ -616,9 +475,7 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
     service = context.user_data.get("selected_service")
 
     if not service:
-        await query.edit_message_text(
-            "❌ Session expired. Please start over with /buy."
-        )
+        await query.edit_message_text("❌ Session expired. Please start over with /buy.")
         return
 
     # Get price
@@ -649,7 +506,6 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
     # ===== STEP 3: Check 5sim balance FIRST =====
     fivesim_balance = get_balance_usd()
     if fivesim_balance is None:
-        # API error - refund user
         update_user_balance(user_id, price_npr, "add")
         await query.edit_message_text(
             "❌ 5sim API is unreachable. Please try again later.\n"
@@ -657,15 +513,13 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    if fivesim_balance < 0.10:  # Less than $0.10
-        # Insufficient 5sim balance - refund user
+    if fivesim_balance < 0.10:
         update_user_balance(user_id, price_npr, "add")
         await query.edit_message_text(
             "⚠️ Service temporarily unavailable. Our system is out of balance.\n"
             "Your balance has been refunded.\n"
             "Please try again in a few minutes."
         )
-        # Notify admin
         await context.bot.send_message(
             ADMIN_ID,
             f"⚠️ LOW 5SIM BALANCE: ${fivesim_balance:.2f}\n"
@@ -683,7 +537,6 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     # ===== STEP 5: Check purchase result =====
     if not order:
-        # No stock or API error - refund user
         update_user_balance(user_id, price_npr, "add")
         await query.edit_message_text(
             f"❌ No numbers available for {country} right now.\n"
@@ -753,7 +606,6 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     # ===== STEP 8: Final result =====
     if code:
-        # SUCCESS - keep the money (already deducted)
         update_order_status(db_order_id, "SUCCESS", code)
         await query.edit_message_text(
             f"🎉 *Verification Code Received!*\n\n"
@@ -768,9 +620,8 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
             ADMIN_ID, f"✅ User {user_id} got {service} code for {phone} ({country})"
         )
     else:
-        # ===== TIMEOUT - YOU LOSE MONEY, USER GETS REFUNDED =====
         update_order_status(db_order_id, "TIMEOUT")
-        update_user_balance(user_id, price_npr, "add")  # Refund user
+        update_user_balance(user_id, price_npr, "add")
         cancel_order(order_id_5sim)
         await query.edit_message_text(
             f"⏰ Timeout. No SMS received within 5 minutes.\n"
@@ -778,14 +629,12 @@ async def country_select_callback(update: Update, context: ContextTypes.DEFAULT_
             f"Your balance has been refunded.\n\n"
             f"⚠️ Please try another country or service."
         )
-        # Log failure for your tracking
         log_failure(user_id, service, country, actual_price_usd)
-
 
 # ======================= ADMIN COMMANDS =======================
 
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot statistics (admin only)."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🔒 Unauthorized.")
         return
@@ -824,7 +673,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-
 async def fivesim_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check 5sim account balance (admin only)."""
     if update.effective_user.id != ADMIN_ID:
@@ -842,8 +690,8 @@ async def fivesim_balance_command(update: Update, context: ContextTypes.DEFAULT_
         parse_mode="Markdown",
     )
 
-
 async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add balance to user (admin only)."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🔒 Unauthorized.")
         return
@@ -872,8 +720,8 @@ async def add_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except:
         pass
 
-
 async def refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refund balance from user (admin only)."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("🔒 Unauthorized.")
         return
@@ -893,7 +741,6 @@ async def refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_balance(user_id, amount, "deduct")
     await update.message.reply_text(f"✅ Deducted NPR {amount} from user {user_id}.")
 
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors and log them."""
     logger = logging.getLogger(__name__)
@@ -906,16 +753,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-
 # ======================= MAIN =======================
 
-
 def main():
+    """Start the bot."""
     setup_database()
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Commands
+    # User commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("balance", balance_command))
@@ -923,8 +769,9 @@ def main():
     app.add_handler(CommandHandler("topup", topup_command))
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("support", support_command))
 
-    # Admin
+    # Admin commands
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("addbalance", add_balance_command))
     app.add_handler(CommandHandler("refund", refund_command))
@@ -935,17 +782,14 @@ def main():
     app.add_handler(CallbackQueryHandler(service_select_callback, pattern="^svc_"))
     app.add_handler(CallbackQueryHandler(country_page_callback, pattern="^cntry_page_"))
     app.add_handler(CallbackQueryHandler(country_select_callback, pattern="^cntry_"))
-    app.add_handler(
-        CallbackQueryHandler(back_to_services_callback, pattern="^back_to_services$")
-    )
+    app.add_handler(CallbackQueryHandler(back_to_services_callback, pattern="^back_to_services$"))
 
     # Error handler
     app.add_error_handler(error_handler)
 
     logging.basicConfig(level=logging.INFO)
-    print("🚀 Bot started! Polling for updates...")
+    print("🚀 Bot started with PostgreSQL! Polling for updates...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
